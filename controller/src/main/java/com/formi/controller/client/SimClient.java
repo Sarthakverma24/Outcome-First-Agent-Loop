@@ -256,10 +256,12 @@ public class SimClient {
                           com.fasterxml.jackson.databind.JsonNode proposedConfig,
                           String summary, Map<String, Object> diff)
             throws ApiException, IOException, InterruptedException {
+        String proposalId = "auto-" + Math.abs(proposedConfig.toString().hashCode()) + "-" + baseVersion;
         Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("proposal_id", proposalId);
         body.put("base_version", baseVersion);
-        body.put("config", mapper.convertValue(proposedConfig, new TypeReference<Map<String,Object>>(){}));
-        body.put("summary", summary);
+        body.put("proposed_config", mapper.convertValue(proposedConfig, new TypeReference<Map<String,Object>>(){}));
+        body.put("rationale", summary);
         body.put("diff", diff);
         String json = mapper.writeValueAsString(body);
         putJson("/workflows/" + workflowId + "/config", json);

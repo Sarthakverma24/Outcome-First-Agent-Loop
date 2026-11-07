@@ -65,14 +65,24 @@ public class HourWeightOptimizer {
     public void run(WorkflowSummary workflow, String currentSimTs, String currentDaySim) {
         String wfId = workflow.workflowId;
         try {
+            int dialStart = (workflow.diallingWindow != null && workflow.diallingWindow.size() > 0)
+                    ? workflow.diallingWindow.get(0) : 9;
+            int dialEnd   = (workflow.diallingWindow != null && workflow.diallingWindow.size() > 1)
+                    ? workflow.diallingWindow.get(1) : 21;
+
             // Query hourly connect rates from recent history
             List<ExposureStore.HourRow> hourRows =
                     exposure.queryHourlyConnectRate(wfId, currentDaySim, BrainConfig.HOUR_WEIGHT_HISTORY_DAYS);
 
-            if (hourRows.isEmpty()) return;
+            // Filter strictly to hours in dialling window
+            List<ExposureStore.HourRow> inWindow = hourRows.stream()
+                    .filter(r -> r.hour >= dialStart && r.hour < dialEnd)
+                    .toList();
+
+            if (inWindow.isEmpty()) return;
 
             // Filter to hours with enough data
-            List<ExposureStore.HourRow> valid = hourRows.stream()
+            List<ExposureStore.HourRow> valid = inWindow.stream()
                     .filter(r -> r.dials >= BrainConfig.HOUR_WEIGHT_MIN_CALLS)
                     .toList();
             if (valid.size() < 2) return; // need at least 2 hours to compute non-trivial weights
@@ -214,11 +224,23 @@ public class HourWeightOptimizer {
     /** Build weights proportional to connect rate, floored at MIN_WEIGHT, summing to 1. */
     private static Map<Integer, Double> buildWeights(List<ExposureStore.HourRow> rows,
                                                       WorkflowSummary workflow) {
+        int dialStart = (workflow.diallingWindow != null && workflow.diallingWindow.size() > 0)
+                ? workflow.diallingWindow.get(0) : 9;
+        int dialEnd   = (workflow.diallingWindow != null && workflow.diallingWindow.size() > 1)
+                ? workflow.diallingWindow.get(1) : 21;
+
         // Floor at MIN_WEIGHT to never exclude an hour
         Map<Integer, Double> raw = new LinkedHashMap<>();
         for (ExposureStore.HourRow r : rows) {
-            raw.put(r.hour, Math.max(MIN_WEIGHT, r.connectRate()));
+            if (r.hour >= dialStart && r.hour < dialEnd) {
+                raw.put(r.hour, Math.max(MIN_WEIGHT, r.connectRate()));
+            }
         }
+        // Fill every missing hour in the dialling window with MIN_WEIGHT
+        for (int h = dialStart; h < dialEnd; h++) {
+            raw.putIfAbsent(h, MIN_WEIGHT);
+        }
+
         // Normalise so weights sum to 1
         double total = raw.values().stream().mapToDouble(Double::doubleValue).sum();
         Map<Integer, Double> normalised = new LinkedHashMap<>();
