@@ -1,172 +1,174 @@
-# Outcome-First Voice Agent Controller
+# Outcome-First Agent Loop — Controller
 
-A production-grade, crash-resilient Java controller for the closed-loop simulated outbound voice-agent platform (**Formi / Agentic Universe**).
+## What this is
 
----
-
-## Architecture & Day 1 Foundation Overview
-
-The controller operates as an always-on control loop that communicates with the simulator **strictly over HTTP**. It builds a local source of truth in SQLite, ingests events idempotently, respects human governance boundaries, and guarantees crash safety across all failure modes.
-
-```
-                  ┌──────────────────────────────────────────────┐
-                  │              Closed-Loop Simulator           │
-                  │              (HTTP API on :8700)             │
-                  └──────▲────────────────┬───────────────┬──────┘
-                         │                │               │
-POST /sim/advance        │                │ GET /events   │ POST /approvals
-                         │                │   /chunks/{n} │ POST /workflows/{id}/apply
-                         │                │               │
-                  ┌──────┴────────────────▼───────────────▼──────┐
-                  │                 Java Controller              │
-                  │                                              │
-                  │  ┌──────────────┐     ┌──────────────────┐   │
-                  │  │   MainLoop   │────▶│    SimClient     │   │
-                  │  └──────┬───────┘     │ (HTTP/1.1 retry) │   │
-                  │         │             └──────────────────┘   │
-                  │         ├──────────────────────────┐         │
-                  │         ▼                          ▼         │
-                  │  ┌──────────────┐         ┌────────────────┐ │
-                  │  │   Ingester   │         │   Governance   │ │
-                  │  │ (idempotent, │         │    Service     │ │
-                  │  │  streamed)   │         │ (state machine)│ │
-                  │  └──────┬───────┘         └────────┬───────┘ │
-                  │         │                          │         │
-                  │         ▼                          ▼         │
-                  │  ┌─────────────────────────────────────────┐ │
-                  │  │            SQLite Store (WAL)           │ │
-                  │  │    calls | leads | approvals | audit    │ │
-                  │  └─────────────────────────────────────────┘ │
-                  └───────────────────────┬──────────────────────┘
-                                          │
-                                   GET /health (:8701)
-                                          ▼
-                                   [Health Monitor]
-```
+A controller that runs alongside a simulator of an outbound voice-agent platform. Each tick it ingests call
+events, detects problems (bad caller IDs, hallucination spikes, experiment results), proposes config changes
+through the simulator's governance API, applies what gets approved, and rolls back changes that stop working.
+Every decision is recorded in a local SQLite audit store before the change is made, so a kill -9 at any
+point leaves the system in a consistent state on restart.
 
 ---
 
-## Key Guarantees & Design Principles
+## Requirements
 
-### 1. Ingestion Idempotency & Backlog Safety
-- **Single Transaction Per Chunk**: Ingests calls, leads, config changes, approval events, and updates the `event_cursor` in **one atomic database transaction**.
-- **Crash Rollback**: An abrupt kill (`kill -9`) mid-chunk rolls back the transaction entirely; on restart, the cursor remains at the previous chunk and re-processes from that boundary.
-- **Deduplication Guard**: `INSERT OR IGNORE` on `calls.event_id` and `leads.lead_id` ensures replayed events are harmless.
-- **NDJSON Streaming**: Reads chunk lines incrementally via `BufferedReader` so memory footprint stays minimal even under full load (~850k events/day).
-
-### 2. Strict Governance Boundary
-- **Deterministic Proposal ID**: Computed as `ctrl-` + first 24 chars of `SHA-256(workflow_id : base_version : canonical_config_json)`. If a proposal was sent before a crash, retrying with the same intent produces the identical ID.
-- **Conflict Handling**: On `409 duplicate_proposal_id`, queries `GET /approvals` and adopts the existing `approval_id`.
-- **Approver Hours & Rate Limits**: Proposes only within `approver_hours` (`[10, 19]` in simulated time), keeping at least 1 request slot in reserve for urgent incidents.
-- **Two-Phase Intent Journaling**: Logs `intent_to_apply` in `audit_log` prior to calling `POST /workflows/{id}/apply`. On failure due to `409 stale_base_version`, flags the proposal as stale without double-applying.
-
-### 3. Storage & Auditability
-- **SQLite in WAL Mode (`PRAGMA journal_mode=WAL`)**: Allows concurrent reads from the background `/health` thread without blocking the main write loop.
-- **Queryable Decision Store**: Append-only `audit_log` tracking ticks, supervisor edits, proposal submissions, approval outcomes, and application results.
-- **Separate KPI Isolation**: Pickup rate and engagement rate are tracked in separate database fields and never blended.
+- **JDK 21** (tested on Eclipse Adoptium 17 and 21; 17 works, 21 preferred)
+- **Maven 3.9+**
+- **Python 3.10+** with `pip install -r requirements.txt` for the simulator
 
 ---
 
-## Project Structure
+## How to run
 
-```
-.
-├── Makefile
-├── README.md
-├── SUBMISSION_TEMPLATE.md
-├── requirements.txt              # Simulator Python dependencies
-├── run.sh                        # Top-level executable wrapper
-├── controller/
-│   ├── pom.xml                   # Maven project config (Java 17/21, shaded jar)
-│   ├── run.sh                    # Controller execution script
-│   ├── ASSUMPTIONS.md            # Running list of documented API assumptions
-│   └── src/
-│       ├── main/java/com/formi/controller/
-│       │   ├── Main.java         # Service bootstrap & shutdown hook
-│       │   ├── Config.java       # Immutable environment configuration
-│       │   ├── client/           # Typed simulator HTTP client & custom exceptions
-│       │   │   ├── SimClient.java
-│       │   │   ├── ApiException.java
-│       │   │   └── model/        # Typed JSON models (Jackson)
-│       │   ├── db/               # SQLite connection & JDBC store
-│       │   │   ├── Database.java
-│       │   │   └── Store.java
-│       │   ├── ingestion/        # Idempotent chunk ingestion
-│       │   │   └── Ingester.java
-│       │   ├── governance/       # Governance state machine & rate limiter
-│       │   │   └── GovernanceService.java
-│       │   ├── health/           # Minimal zero-dependency /health server
-│       │   │   ├── HealthServer.java
-│       │   │   └── HealthState.java
-│       │   └── loop/             # Main simulation control loop
-│       │       └── MainLoop.java
-│       └── test/java/com/formi/controller/
-│           ├── ingestion/IngesterIdempotencyTest.java
-│           └── governance/GovernanceServiceTest.java
-├── docs/
-│   └── SIMULATOR.md              # Outside world specification
-├── reports/
-│   └── public_01.md              # Grader report from end-to-end run
-├── scenarios/                    # Scenario definitions (dev, incidents, load)
-├── sim/                          # Closed-loop simulator engine
-└── tests/                        # Simulator test suite
-```
+### public_01 (3 workflows, 8 days, no incidents)
 
----
-
-## Quickstart
-
-### Prerequisites
-- **JDK 17+** (or JDK 21+)
-- **Apache Maven 3.9+**
-- **Python 3.10+** (for running the simulator)
-
-### 1. Install Simulator Dependencies
 ```bash
-pip install -r requirements.txt
-```
-
-### 2. Run Controller Tests
-```bash
-cd controller
-mvn test
-cd ..
-```
-
-### 3. Run public_01 End-to-End
-
-**Terminal 1 — Start the Simulator:**
-```bash
-python -m sim serve --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01 --port 8700
-```
-
-**Terminal 2 — Run the Controller:**
-```bash
-./run.sh http://127.0.0.1:8700
-```
-
-The controller will:
-1. Bootstrap historical chunk data prior to D0.
-2. Advance through the 8 simulated days.
-3. Submit a smoke-test proposal within approver hours, receive approval, and apply it.
-4. Exit cleanly on scenario completion after ingesting all 297,000+ events.
-
-### 4. Verify & Grade
-```bash
+# Terminal 1 — simulator
 python -m sim baseline --scenario scenarios/public_01_dev.yaml --run-dir runs/base01
+python -m sim serve    --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01
+
+# Terminal 2 — controller (builds on first run; ~30 s)
+mvn -q package -DskipTests -f controller/pom.xml
+DB_PATH=runs/mine01/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+
+# Terminal 3 — grade (run after the controller exits)
+$env:PYTHONIOENCODING="utf-8"
 python -m sim grade --run runs/mine01 --baseline runs/base01 --out reports/public_01.md
 ```
 
+### public_02 (caller-ID incident, bad supervisor prompt, mid-experiment config edit)
+
+```bash
+# Terminal 1
+python -m sim baseline --scenario scenarios/public_02_incidents.yaml --run-dir runs/base02
+python -m sim serve    --scenario scenarios/public_02_incidents.yaml --run-dir runs/mine02
+
+# Terminal 2
+DB_PATH=runs/mine02/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+
+# Terminal 3
+$env:PYTHONIOENCODING="utf-8"
+python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
+```
+
+> **Note:** grade reports for both scenarios are already committed in `reports/`.
+
 ---
 
-## Configuration Reference
+## Capabilities built
 
-Set via environment variables:
+| Capability | Status | Note |
+|---|---|---|
+| C1 Ingestion | Done | Idempotent, cursor-based, single transaction per chunk |
+| C2 Shared cohort object | Done | One function used by detection and experiments; OR-within-feature, AND-across-features |
+| C5 Caller-ID health | Done | Flags bad IDs after min-sample + persistence check; rotates within auto-apply policy, splits if shift exceeds max_shift |
+| C6 Experiments | Done | Two-proportion z-test, Holm correction, one look per simulated day, min 300 connected calls per arm |
+| C7 Promotion and rollback | Done | Re-measures winners post-apply; proposes rollback on sustained negative advantage |
+| C8 Hallucination response | Done | Detects rate rise above baseline; proposes prompt rollback with evidence; records "awaiting_validation" if no validation run exists; never auto-applies |
+| C9 Governance client | Done | Full lifecycle: proposal, auto-apply, approver-hours guard, rate limit with incident reserve, stale-base re-proposal, expiry |
+| C12 Audit store | Done | Every decision traceable to trigger, evidence, proposal_id, approval_id, and outcome |
+| C13 Crash recovery | Done | kill -9 safe; startup reconciler re-syncs pending approvals; intent-to-apply written before /apply |
+| C3 Hour weights | Partial | History bootstrapped; cohort-level hour table built from observed connect rates; no per-person timing |
+| C10 Dry runs | Partial | Count-based justification attached to every proposal; not a full history replay |
+| C11 Supervisor view | Partial | JSON /health endpoint; no consolidated UI |
+| C14 Observability | Partial | /health reports ingest lag and pending approval count |
+| C4 Per-person timing | Cut | Business owns cadence; cohort-level hour weights cover the meaningful case |
+| C15 Tenant fairness | Cut | Single workflow per tenant in these scenarios; not enough signal to build from |
 
-| Variable | Default | Purpose |
+---
+
+## Crash recovery test
+
+```bash
+# 1. Start sim and controller (Terminals 1 and 2 as above, then wait ~60 s for a few ticks)
+
+# 2. Kill the controller hard
+Get-Process -Name java | Stop-Process -Force          # Windows
+# or:  kill -9 <pid>                                  # Linux/Mac
+
+# 3. Restart — the controller picks up from its cursor
+DB_PATH=runs/mine01/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+
+# 4. Confirm: audit log has no duplicate intent_to_apply rows and total events match
+python -c "
+import sqlite3
+db = sqlite3.connect('runs/mine01/controller.db')
+cur = db.cursor()
+# No proposal should appear in intent_to_apply more than once
+rows = cur.execute('''
+  SELECT payload_json, COUNT(*) as n FROM audit_log
+  WHERE kind = 'intent_to_apply'
+  GROUP BY payload_json HAVING n > 1
+''').fetchall()
+print('Duplicates (expect 0 rows):', rows)
+print('Total events ingested:', cur.execute('SELECT SUM(events_in_chunk) FROM ingest_cursors').fetchone())
+db.close()
+"
+```
+
+Evidence from the committed run is in `reports/kill9_evidence.txt`.
+
+---
+
+## Audit store query
+
+Run this against `runs/mine01/controller.db` (or any run DB) to trace a specific change:
+
+```sql
+SELECT
+  a.workflow_id,
+  a.summary          AS trigger_and_numbers,
+  a.proposal_id,
+  a.approval_id,
+  a.status           AS approval_status,
+  al_next.kind       AS next_event,
+  al_next.payload_json AS next_payload
+FROM approvals a
+LEFT JOIN audit_log al_next
+  ON  al_next.workflow_id = a.workflow_id
+  AND al_next.id = (
+        SELECT MIN(id) FROM audit_log
+        WHERE workflow_id = a.workflow_id
+          AND kind NOT IN ('tick','intent_to_apply')
+          AND ts_sim > (
+                SELECT ts_sim FROM audit_log
+                WHERE kind = 'intent_to_apply'
+                  AND payload_json LIKE '%' || a.proposal_id || '%'
+                LIMIT 1
+              )
+      )
+ORDER BY a.rowid;
+```
+
+Example row from the `public_01` run:
+
+| workflow_id | trigger_and_numbers | proposal_id | approval_id | approval_status | next_event |
+|---|---|---|---|---|---|
+| nw_kyc | Hour-weight optimisation (chi2=20.21, p=0.0005, TVD=0.1947) | ctrl-3b393c36db47901b80d320c3 | apr_00001 | applied | hour_weight_applied |
+
+---
+
+## Configuration
+
+| Environment variable | Default | Description |
 |---|---|---|
 | `DB_PATH` | `controller.db` | Path to the SQLite database file |
-| `TICK_MINUTES` | `15` | Simulated minutes to advance per tick |
-| `HEALTH_PORT` | `8701` | HTTP port for the `/health` endpoint |
-| `LOG_LEVEL` | `info` | SLF4J log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
-| `DEMO_PROPOSAL` | `false` | When `true`, submits one harmless proposal on Day 1 to exercise the governance cycle |
+| `TICK_MINUTES` | `60` | Simulated minutes per controller tick |
+| `HEALTH_PORT` | `8701` | Port for the `/health` HTTP endpoint |
+| `MIN_CONNECTED_PER_ARM` | `300` | Minimum connected calls per arm before an experiment look |
+| `MIN_DIALS_FOR_CALLER_ID_FLAG` | `200` | Minimum dials before a caller ID can be flagged |
+| `CALLER_ID_WINDOW_DAYS` | `3` | Rolling window for caller-ID pickup-rate comparison |
+
+---
+
+## What was not built and why
+
+**C4 (per-person timing):** The business owns cadence, so the controller cannot decide *when* a specific
+person gets called — only which cohort-hour weights to shift. That boundary rules out individual scheduling.
+**C15 (tenant fairness):** Each scenario here has one workflow per tenant, giving no basis to build or
+test cross-tenant credit allocation; adding it untested would be worse than leaving it cut.
+**Full C10 replay:** The impact score attached to each proposal uses live cohort counts, not a historical
+re-simulation. A full replay would need the simulator's internal lead-to-call assignment logic, which the
+API does not expose — and reading those files is disqualifying.
+
+For design decisions, stat justifications, and stakeholder responses, see **[SUBMISSION.md](SUBMISSION.md)**.
