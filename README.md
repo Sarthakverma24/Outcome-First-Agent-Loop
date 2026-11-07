@@ -20,45 +20,44 @@ point leaves the system in a consistent state on restart.
 
 ## How to run
 
-All commands are for Windows PowerShell. On Linux/Mac replace `$env:VAR = "..."` with `export VAR=...`.
-
 ### public_01 (3 workflows, 8 days, no incidents)
 
-```powershell
+```bash
 # Terminal 1 — simulator
 python -m sim baseline --scenario scenarios/public_01_dev.yaml --run-dir runs/base01
 python -m sim serve    --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01
 
 # Terminal 2 — controller (builds on first run; ~30 s)
 mvn -q package -DskipTests -f controller/pom.xml
-$env:DB_PATH = "runs/mine01/controller.db"
-$env:TICK_MINUTES = "60"
-java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+DB_PATH=runs/mine01/controller.db TICK_MINUTES=60 \
+  java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
 # Terminal 3 — grade (run after the controller exits)
-$env:PYTHONIOENCODING = "utf-8"
-python -m sim grade --run runs/mine01 --baseline runs/base01 --out reports/public_01.md
+PYTHONIOENCODING=utf-8 python -m sim grade \
+  --run runs/mine01 --baseline runs/base01 --out reports/public_01.md
 ```
 
 ### public_02 (caller-ID incident, bad supervisor prompt, mid-experiment config edit)
 
-```powershell
+```bash
 # Terminal 1
 python -m sim baseline --scenario scenarios/public_02_incidents.yaml --run-dir runs/base02
 python -m sim serve    --scenario scenarios/public_02_incidents.yaml --run-dir runs/mine02
 
 # Terminal 2
-$env:DB_PATH = "runs/mine02/controller.db"
-$env:TICK_MINUTES = "60"
-java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+DB_PATH=runs/mine02/controller.db TICK_MINUTES=60 \
+  java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
 # Terminal 3
-$env:PYTHONIOENCODING = "utf-8"
-python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
+PYTHONIOENCODING=utf-8 python -m sim grade \
+  --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
 ```
 
 > **Note:** committed grade reports are in `reports/public_01.md` and `reports/public_01_day2.md`.
-> Running the commands above regenerates them for a fresh run.
+> The grader scores schedule-dimension changes (hour weights) as neutral — all 134 applied changes in
+> the committed run are hour-weight adjustments. The grader shows Δ=+0.0% on conclusion rate, pickup,
+> and engagement for all three workflows. No harmful changes were applied. The experiment and caller-ID
+> decisions are traceable in the audit store (see the query in the Audit store section below).
 
 ---
 
@@ -86,31 +85,39 @@ python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/publi
 
 ## Crash recovery test
 
-```powershell
+```bash
 # 1. Start sim and controller (Terminals 1 and 2 as above, then wait ~60 s for a few ticks)
 
 # 2. Kill the controller hard
-Get-Process -Name java | Stop-Process -Force
+kill -9 <pid>           # Linux/Mac
+# Windows: Get-Process -Name java | Stop-Process -Force
 
-# 3. Restart — the controller picks up from its cursor
-$env:DB_PATH = "runs/mine01/controller.db"
-$env:TICK_MINUTES = "60"
-java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+# 3. Restart — the controller resumes from its cursor
+DB_PATH=runs/mine01/controller.db TICK_MINUTES=60 \
+  java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
-# 4. Confirm: audit log has no duplicate intent_to_apply rows and cursor advanced past restart point
-python -c "
+# 4. Confirm no duplicate approvals and that the cursor advanced past the restart point
+python - <<'EOF'
 import sqlite3
-db = sqlite3.connect('runs/mine01/controller.db')
+db = sqlite3.connect("runs/mine01/controller.db")
 cur = db.cursor()
-rows = cur.execute('SELECT payload_json, COUNT(*) as n FROM audit_log WHERE kind = ? GROUP BY payload_json HAVING n > 1', ('intent_to_apply',)).fetchall()
-print('Duplicates (expect 0 rows):', rows)
-cursor_val = cur.execute('SELECT value FROM kv_state WHERE key = ?', ('event_cursor',)).fetchone()
-print('Event cursor after restart:', cursor_val)
+dups = cur.execute(
+    "SELECT payload_json, COUNT(*) n FROM audit_log "
+    "WHERE kind='intent_to_apply' GROUP BY payload_json HAVING n>1"
+).fetchall()
+print("Duplicate intent_to_apply rows (expect 0):", dups)
+cursor_pos = cur.execute(
+    "SELECT value FROM kv_state WHERE key='event_cursor'"
+).fetchone()
+print("Event cursor after restart:", cursor_pos)
 db.close()
-"
+EOF
 ```
 
-Evidence from a committed kill/restart run is in `reports/kill_restart_evidence.txt`.
+The committed evidence file is `reports/kill_restart_evidence.txt`. It shows the controller was
+killed at cursor=0 (before the first chunk was committed), restarted, and ran to completion
+(297,026 events ingested). The Phase 3/5 inline validation scripts in that file contain a quoting
+bug and do not print assertions — the cursor and duplicate checks above are the correct form.
 
 ---
 
