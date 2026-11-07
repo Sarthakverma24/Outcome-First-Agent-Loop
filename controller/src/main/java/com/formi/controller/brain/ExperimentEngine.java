@@ -403,9 +403,9 @@ public class ExperimentEngine {
 
         log.info("[{}][{}][{}] WINNER={} effect={:.3f}", wfId, cohortId, dim, winner, result.effectSize);
 
-        // Build proposed config: update the dimension value for this cohort
+        // Build proposed config: update the dimension value for this cohort, reserving >= 10% for control
         ObjectNode proposed = cv.config.deepCopy();
-        setDimensionInConfig(proposed, dim, winner, cohortId);
+        setDimensionInConfig(proposed, dim, winner, controlValue, cohortId);
 
         Map<String, Object> diff = Map.of(
                 dim + ".cohort." + cohortId, winner + " (was: " + controlValue + ")"
@@ -596,10 +596,29 @@ public class ExperimentEngine {
         return null;
     }
 
-    /** Update the dimension value in a proposed config (deep copy from caller). */
-    private static void setDimensionInConfig(ObjectNode proposed, String dim, String value, String cohortId) {
-        // Simplest defensible change: set at top level (applies to all cohorts as default)
-        proposed.put(dim, value);
+    /** Update the dimension allocation in proposed config, ensuring control arm has at least 10% of traffic. */
+    private static void setDimensionInConfig(ObjectNode proposed, String dim, String winner, String controlValue, String cohortId) {
+        proposed.put(dim, winner);
+
+        // Update allocations map: control arm is at least 10% of traffic, winner gets remainder
+        JsonNode allocNode = proposed.path("allocations");
+        if (allocNode.isObject()) {
+            ObjectNode allocObj = (ObjectNode) allocNode;
+            String targetCohort = (cohortId != null && allocObj.has(cohortId)) ? cohortId : "default";
+            JsonNode cohortNode = allocObj.path(targetCohort);
+            if (cohortNode.isObject()) {
+                ObjectNode cObj = (ObjectNode) cohortNode;
+                ObjectNode dimMap = MAPPER.createObjectNode();
+                if (controlValue == null || winner.equals(controlValue)) {
+                    dimMap.put(winner, 1.0);
+                } else {
+                    // Control arm is at least 10% of traffic (Check 10)
+                    dimMap.put(winner, 0.90);
+                    dimMap.put(controlValue, 0.10);
+                }
+                cObj.set(dim, dimMap);
+            }
+        }
     }
 
     /** Available options from workflow.options for a dimension. */

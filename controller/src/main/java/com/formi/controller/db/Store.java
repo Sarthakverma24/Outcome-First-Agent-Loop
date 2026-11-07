@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -265,6 +266,42 @@ public class Store {
             }
         }
         return rows;
+    }
+
+    /** Get single approval row by proposalId. */
+    public Map<String, Object> getApproval(String proposalId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT proposal_id, approval_id, workflow_id, base_version, status, summary, created_ts FROM approvals WHERE proposal_id=?")) {
+            ps.setString(1, proposalId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                Map<String, Object> row = new HashMap<>();
+                row.put("proposalId",  rs.getString("proposal_id"));
+                row.put("approvalId",  rs.getString("approval_id"));
+                row.put("workflowId",  rs.getString("workflow_id"));
+                row.put("baseVersion", rs.getInt("base_version"));
+                row.put("status",      rs.getString("status"));
+                row.put("summary",     rs.getString("summary"));
+                row.put("createdTs",   rs.getString("created_ts"));
+                return row;
+            }
+        }
+    }
+
+    /** Count how many proposals have been created for this exact config and base_version. */
+    public int countProposalsForConfig(String workflowId, int baseVersion, String configJson) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT COUNT(*) FROM approvals WHERE workflow_id=? AND base_version=? AND proposed_config_json=?")) {
+            ps.setString(1, workflowId);
+            ps.setInt(2, baseVersion);
+            ps.setString(3, configJson);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            log.error("Failed to count proposals: {}", e.getMessage());
+            return 0;
+        }
     }
 
     /**

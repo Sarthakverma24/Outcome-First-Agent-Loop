@@ -136,6 +136,10 @@ public class HourWeightOptimizer {
                                double tvd, double chi2, double pValue, String currentSimTs) throws Exception {
         ObjectNode proposed = cv.config.deepCopy();
         setHourWeightsInConfig(proposed, weights);
+        if (tvd < 1e-4 || cv.config.equals(proposed)) {
+            log.debug("[{}] Hour weights unchanged (TVD={:.4f}) — skipping auto-apply.", wfId, tvd);
+            return;
+        }
 
         Map<String, Object> diff = Map.of(
                 "schedule.hour_weights.default",

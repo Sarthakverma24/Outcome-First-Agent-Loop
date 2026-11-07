@@ -113,34 +113,37 @@ public class SupervisorEditHandler {
     // ── Stale and expired proposals ───────────────────────────────────────
 
     /**
-     * Find proposals with status "stale" or "expired" that are linked to experiments,
-     * and mark those experiments for re-queue (back to "running" status so the
-     * ExperimentEngine will start a new look with a new deterministic ID next tick).
+     * Find proposals with status "stale", "expired", "rejected", or "denied" that are linked
+     * to experiments, and mark those experiments so they are excluded from evidence and
+     * either re-queued (if expired/stale) or marked terminal (if rejected/denied).
      */
     private void handleStaleExpiredProposals(String workflowId, String currentSimTs) throws Exception {
-        // Find experiments linked to stale or expired proposals
+        // Find experiments linked to stale, expired, rejected, or denied proposals
         try (PreparedStatement ps = conn.prepareStatement("""
-                SELECT e.experiment_id FROM experiments e
+                SELECT e.experiment_id, a.status FROM experiments e
                 JOIN approvals a ON a.proposal_id = e.proposal_id
                 WHERE e.workflow_id = ?
-                  AND a.status IN ('stale', 'expired')
+                  AND a.status IN ('stale', 'expired', 'rejected', 'denied')
                   AND e.status IN ('winner_proposed', 'winner_pending')
                 """)) {
             ps.setString(1, workflowId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String expId = rs.getString(1);
-                    // Reset to "expired" — ExperimentEngine will start a fresh one
+                    String appStatus = rs.getString(2);
+                    String newStatus = ("rejected".equals(appStatus) || "denied".equals(appStatus))
+                            ? "rejected" : "expired";
                     try (PreparedStatement upd = conn.prepareStatement(
-                            "UPDATE experiments SET status='expired' WHERE experiment_id=?")) {
-                        upd.setString(1, expId);
+                            "UPDATE experiments SET status=? WHERE experiment_id=?")) {
+                        upd.setString(1, newStatus);
+                        upd.setString(2, expId);
                         upd.executeUpdate();
                     }
-                    store.audit(currentSimTs, workflowId, "experiment_expired", Map.of(
+                    store.audit(currentSimTs, workflowId, "experiment_" + newStatus, Map.of(
                             "experimentId", expId,
-                            "reason", "linked_proposal_stale_or_expired"
+                            "reason", "linked_proposal_" + appStatus
                     ));
-                    log.info("[{}] Experiment {} marked expired (proposal stale/expired).", workflowId, expId);
+                    log.info("[{}] Experiment {} marked {} (proposal {}).", workflowId, expId, newStatus, appStatus);
                 }
             }
         }

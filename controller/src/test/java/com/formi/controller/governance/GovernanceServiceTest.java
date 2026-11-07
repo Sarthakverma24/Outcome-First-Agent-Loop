@@ -190,6 +190,40 @@ class GovernanceServiceTest {
         String id2 = GovernanceService.computeProposalId("wf-x", 3, config);
         assertEquals(id1, id2, "Same inputs must produce same proposal_id");
         assertTrue(id1.startsWith("ctrl-"), "Proposal ID should have 'ctrl-' prefix");
+
+        // Retry / re-queue attempt must generate a distinct NEW proposal_id
+        String idRetry = GovernanceService.computeProposalId("wf-x", 3, config, 1);
+        assertNotEquals(id1, idRetry, "Re-queued proposal must receive a NEW proposal_id");
+    }
+
+    @Test
+    void propose_requeuedAfterExpiry_hasNewProposalId() throws Exception {
+        JsonNode config = makeConfig();
+        List<String> submittedIds = new ArrayList<>();
+
+        FakeSimClient fake = new FakeSimClient()
+                .onSubmit(r -> {
+                    submittedIds.add(r.proposalId);
+                    return successResult("apr-" + submittedIds.size());
+                });
+
+        GovernanceService gov = new GovernanceService(fake, store);
+        WorkflowSummary wf = makeWorkflow("wf-a", List.of(9, 19), 5, 24, 2);
+
+        // First proposal
+        String apr1 = gov.propose(wf, 1, config, "Change 1", Map.of(), 10, Map.of(), 0.5, "rat", null, "2027-01-05T11:00:00+05:30");
+        assertNotNull(apr1);
+
+        // Mark it expired
+        store.updateApprovalStatus(submittedIds.get(0), "expired", "2027-01-06T11:00:00+05:30", null);
+
+        // Re-propose the same config
+        String apr2 = gov.propose(wf, 1, config, "Change 1 re-queued", Map.of(), 10, Map.of(), 0.5, "rat", null, "2027-01-06T12:00:00+05:30");
+        assertNotNull(apr2);
+
+        assertEquals(2, submittedIds.size());
+        assertNotEquals(submittedIds.get(0), submittedIds.get(1),
+                "Expired proposal re-queued must have a NEW proposal_id");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

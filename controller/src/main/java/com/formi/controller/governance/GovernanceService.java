@@ -109,8 +109,9 @@ public class GovernanceService {
         }
 
         // ── Build and submit ───────────────────────────────────────────────────
-        String proposalId = computeProposalId(workflowId, baseVersion, proposedConfig);
-        log.info("[{}] Submitting proposal {} (base_version={}).", workflowId, proposalId, baseVersion);
+        int pastProposals = store.countProposalsForConfig(workflowId, baseVersion, mapper.writeValueAsString(proposedConfig));
+        String proposalId = computeProposalId(workflowId, baseVersion, proposedConfig, pastProposals);
+        log.info("[{}] Submitting proposal {} (base_version={}, attempt={}).", workflowId, proposalId, baseVersion, pastProposals);
 
         ApprovalRequest req = new ApprovalRequest();
         req.proposalId     = proposalId;
@@ -222,6 +223,25 @@ public class GovernanceService {
             Map<String, Object> ok = new HashMap<>();
             ok.put("proposalId", proposalId);
             ok.put("approvalId", approvalId);
+
+            // Record time_to_rollback_minutes if this is a decay rollback apply
+            try {
+                Map<String, Object> appRow = store.getApproval(proposalId);
+                if (appRow != null) {
+                    String summary = (String) appRow.get("summary");
+                    if (summary != null && summary.contains("Rollback decaying variant")) {
+                        String createdTs = (String) appRow.get("createdTs");
+                        if (createdTs != null) {
+                            long mins = java.time.Duration.between(
+                                    java.time.Instant.parse(createdTs),
+                                    java.time.Instant.parse(currentSimTs)
+                            ).toMinutes();
+                            ok.put("time_to_rollback_minutes", mins);
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+
             store.audit(currentSimTs, workflowId, "applied", ok);
             log.info("[{}] Applied approval {} successfully.", workflowId, approvalId);
             return true;
@@ -297,8 +317,13 @@ public class GovernanceService {
      * requiring us to query the DB before every propose().
      */
     static String computeProposalId(String workflowId, int baseVersion, JsonNode proposedConfig) {
+        return computeProposalId(workflowId, baseVersion, proposedConfig, 0);
+    }
+
+    static String computeProposalId(String workflowId, int baseVersion, JsonNode proposedConfig, int attempt) {
         // Sort the config JSON alphabetically so key order doesn't matter
-        String canonical = workflowId + ":" + baseVersion + ":" + proposedConfig.toString();
+        String canonical = workflowId + ":" + baseVersion + ":" + proposedConfig.toString()
+                + (attempt > 0 ? ":attempt:" + attempt : "");
         try {
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
             byte[] hash = sha256.digest(canonical.getBytes(StandardCharsets.UTF_8));

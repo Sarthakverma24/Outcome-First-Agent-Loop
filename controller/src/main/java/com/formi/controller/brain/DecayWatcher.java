@@ -43,6 +43,8 @@ public class DecayWatcher {
 
     // In-memory decay counters: experimentId → consecutive-negative-ticks
     private final Map<String, Integer> decayCounts = new HashMap<>();
+    // In-memory record of when decay was first detected: experimentId → sim_ts
+    private final Map<String, String> decayOnsetTs = new HashMap<>();
 
     public DecayWatcher(Connection conn, Store store, SimClient client, GovernanceService governance) {
         this.conn       = conn;
@@ -101,6 +103,7 @@ public class DecayWatcher {
         double advantage = pWinner - pControl;
 
         if (advantage < 0.0) {
+            decayOnsetTs.putIfAbsent(exp.experimentId, currentSimTs);
             int ticks = decayCounts.merge(exp.experimentId, 1, Integer::sum);
             log.warn("[{}][{}][{}] Decay: winner={} advantage={:.4f} ticks={}",
                     wfId, exp.cohortId, exp.dim, exp.winnerValue, advantage, ticks);
@@ -111,6 +114,7 @@ public class DecayWatcher {
             }
         } else {
             decayCounts.put(exp.experimentId, 0); // advantage still positive — reset
+            decayOnsetTs.remove(exp.experimentId);
         }
     }
 
@@ -121,19 +125,28 @@ public class DecayWatcher {
         log.warn("[{}] DECAY ROLLBACK: {} dim={} winner={} → control={}",
                 wfId, exp.cohortId, exp.dim, exp.winnerValue, exp.controlValue);
 
-        // Compute wall time since apply (for audit)
-        long wallNowMs  = System.currentTimeMillis();
+        String onset = decayOnsetTs.getOrDefault(exp.experimentId, currentSimTs);
+        long elapsedSimMinutes = 0;
+        try {
+            elapsedSimMinutes = java.time.Duration.between(
+                    java.time.Instant.parse(onset),
+                    java.time.Instant.parse(currentSimTs)
+            ).toMinutes();
+        } catch (Exception ignored) {}
 
         Map<String, Object> finding = new LinkedHashMap<>();
-        finding.put("experimentId",     exp.experimentId);
-        finding.put("cohortId",         exp.cohortId);
-        finding.put("dim",              exp.dim);
-        finding.put("winnerValue",      exp.winnerValue);
-        finding.put("controlValue",     exp.controlValue);
-        finding.put("pWinner",          pWinner);
-        finding.put("pControl",         pControl);
-        finding.put("advantage",        advantage);
-        finding.put("decayTicks",       BrainConfig.DECAY_CONSECUTIVE_TICKS);
+        finding.put("experimentId",                  exp.experimentId);
+        finding.put("cohortId",                      exp.cohortId);
+        finding.put("dim",                           exp.dim);
+        finding.put("winnerValue",                   exp.winnerValue);
+        finding.put("controlValue",                  exp.controlValue);
+        finding.put("pWinner",                       pWinner);
+        finding.put("pControl",                      pControl);
+        finding.put("advantage",                     advantage);
+        finding.put("decayTicks",                    BrainConfig.DECAY_CONSECUTIVE_TICKS);
+        finding.put("decay_onset_sim_ts",            onset);
+        finding.put("rollback_triggered_sim_ts",     currentSimTs);
+        finding.put("time_to_rollback_minutes",       elapsedSimMinutes);
         store.audit(currentSimTs, wfId, "decay_rollback_triggered", finding);
 
         // Propose a rollback (restore control value)
