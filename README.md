@@ -53,11 +53,11 @@ PYTHONIOENCODING=utf-8 python -m sim grade \
   --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
 ```
 
-> **Note:** committed grade reports are in `reports/public_01.md` and `reports/public_01_day2.md`.
-> The grader scores schedule-dimension changes (hour weights) as neutral — all 134 applied changes in
-> the committed run are hour-weight adjustments. The grader shows Δ=+0.0% on conclusion rate, pickup,
-> and engagement for all three workflows. No harmful changes were applied. The experiment and caller-ID
-> decisions are traceable in the audit store (see the query in the Audit store section below).
+> **Note:** committed grade reports are in `reports/public_01.md` and `reports/public_02.md`.
+> The grader scores schedule-dimension changes (hour weights) as neutral — 134 applied changes in
+> public_01 and 167 in public_02. The grader shows Δ=+0.0% on conclusion rate, pickup, and engagement.
+> No harmful changes were applied. The experiment and caller-ID decisions are traceable in the
+> audit store (see the query in the Audit store section below).
 
 ---
 
