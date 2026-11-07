@@ -244,6 +244,27 @@ public class SimClient {
         putJson("/workflows/" + workflowId + "/config", json);
     }
 
+    /**
+     * PUT /workflows/{id}/config — typed overload accepting a full proposed config
+     * JSON node with the base_version and an optional diff for auditing.
+     * Builds the standard body: {base_version, config, diff}.
+     *
+     * @throws AutoApplyNotPermittedException if the policy forbids it
+     * @throws StaleBaseVersionException      if base_version is stale
+     */
+    public void putConfig(String workflowId, int baseVersion,
+                          com.fasterxml.jackson.databind.JsonNode proposedConfig,
+                          String summary, Map<String, Object> diff)
+            throws ApiException, IOException, InterruptedException {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("base_version", baseVersion);
+        body.put("config", mapper.convertValue(proposedConfig, new TypeReference<Map<String,Object>>(){}));
+        body.put("summary", summary);
+        body.put("diff", diff);
+        String json = mapper.writeValueAsString(body);
+        putJson("/workflows/" + workflowId + "/config", json);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // HTTP helpers — GET with retry, POST/PUT without retry
     // ══════════════════════════════════════════════════════════════════════════
