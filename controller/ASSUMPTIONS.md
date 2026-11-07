@@ -64,3 +64,17 @@ in Day 2 when deciding whether to propose mid-campaign changes.
 `GET /sim/state → credits_remaining` reflects the scenario-wide budget. We track this
 after every advance and log a warning when < 20 credits remain. We make no LLM or
 validation calls on Day 1, so credits are not consumed.
+
+## A11 — Statistical Aggregations on Realised Variant Values
+Realised variants delivered on call events (`variant.*` in raw NDJSON) are stored directly
+in flat columns in `calls` (`voice`, `welcome_message`, `caller_id`, `prompt_version`).
+All statistical tests query these columns rather than looking up config version allocations.
+
+## A12 — Stouffer Combining for Attempt Strata
+When combining z-scores across attempt numbers, strata with fewer than 10 dials are skipped.
+Valid strata z-scores are combined with Stouffer's method ($z_{combined} = \sum z_k / \sqrt{K}$)
+under the assumption of independent stratum trials.
+
+## A13 — Approvals Rate Limit Buffer
+1 proposal slot is always held in reserve for emergency incidents (e.g. caller ID breakdown or
+hallucination rollback), limiting routine experiments to at most `max_requests_per_24h - 1`.

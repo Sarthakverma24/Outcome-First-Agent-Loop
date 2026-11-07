@@ -1,6 +1,7 @@
 package com.formi.controller;
 
 import com.formi.controller.client.SimClient;
+import com.formi.controller.brain.Brain;
 import com.formi.controller.db.Database;
 import com.formi.controller.db.Store;
 import com.formi.controller.governance.GovernanceService;
@@ -65,7 +66,8 @@ public class Main {
         // ── 5. Build services ─────────────────────────────────────────────────
         Ingester ingester = new Ingester(client, store, db.getConnection());
         GovernanceService governance = new GovernanceService(client, store);
-        MainLoop loop = new MainLoop(cfg, client, store, ingester, governance, healthState);
+        Brain brain = new Brain(db.getConnection(), store, client, governance);
+        MainLoop loop = new MainLoop(cfg, client, store, ingester, governance, healthState, brain);
 
         // ── SIGTERM handler ───────────────────────────────────────────────────
         // Requests a clean stop after the current tick completes.

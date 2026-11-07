@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.formi.controller.Config;
+import com.formi.controller.brain.Brain;
 import com.formi.controller.client.ApiException;
 import com.formi.controller.client.FinishedException;
 import com.formi.controller.client.SimClient;
@@ -53,6 +54,7 @@ public class MainLoop {
     private final Ingester         ingester;
     private final GovernanceService governance;
     private final HealthState      healthState;
+    private final Brain            brain;
     private final ObjectMapper     mapper = new ObjectMapper();
 
     // Set by the SIGTERM shutdown hook to request a clean stop
@@ -62,13 +64,15 @@ public class MainLoop {
     private boolean demoDone = false;
 
     public MainLoop(Config cfg, SimClient client, Store store,
-                    Ingester ingester, GovernanceService governance, HealthState healthState) {
+                    Ingester ingester, GovernanceService governance,
+                    HealthState healthState, Brain brain) {
         this.cfg        = cfg;
         this.client     = client;
         this.store      = store;
         this.ingester   = ingester;
         this.governance = governance;
         this.healthState = healthState;
+        this.brain      = brain;
     }
 
     public void requestStop() { stopRequested.set(true); }
@@ -152,6 +156,9 @@ public class MainLoop {
                 demoDone = true;
             }
         }
+
+        // ── Day 2 Brain — run all analysis components ──────────────────────────
+        brain.tick(workflows, simTs);
 
         // ── Fetch sim state for credits / health ───────────────────────────────
         SimState simState = client.getSimState();
