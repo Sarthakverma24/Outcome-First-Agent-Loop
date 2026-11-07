@@ -33,7 +33,7 @@ public class Database {
     private static final Logger log = LoggerFactory.getLogger(Database.class);
 
     /** Current schema version. Increment when adding migrations below. */
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final String path;
     private Connection connection;
@@ -93,7 +93,11 @@ public class Database {
             applyV1();
             setSchemaVersion(1);
         }
-        // Add `if (current < 2) { applyV2(); setSchemaVersion(2); }` here for future migrations
+        if (current < 2) {
+            applyV2();
+            setSchemaVersion(2);
+        }
+        // Add `if (current < 3) { applyV3(); setSchemaVersion(3); }` here for future migrations
     }
 
     /**
@@ -214,6 +218,44 @@ public class Database {
             st.execute("CREATE INDEX IF NOT EXISTS idx_audit_wf ON audit_log(workflow_id, ts_sim)");
         }
         log.info("Schema migration v1 complete.");
+    }
+
+    /**
+     * V2: Day 2 brain tables.
+     * Uses CREATE TABLE IF NOT EXISTS — idempotent if called on an existing DB.
+     */
+    private void applyV2() throws SQLException {
+        log.info("Applying schema migration v2 (Day 2 brain tables)…");
+        try (Statement st = connection.createStatement()) {
+
+            // ── experiments ───────────────────────────────────────────────
+            // One row per A/B experiment. experiment_id is deterministic (SHA-256)
+            // so a crash-and-restart cannot create a duplicate experiment for the
+            // same (workflow, cohort, dimension, start_day) combination.
+            st.execute("""
+                CREATE TABLE IF NOT EXISTS experiments (
+                    experiment_id       TEXT PRIMARY KEY,
+                    workflow_id         TEXT NOT NULL,
+                    cohort_id           TEXT NOT NULL,
+                    dimension           TEXT NOT NULL,  -- "voice" | "welcome_message"
+                    control_value       TEXT NOT NULL,  -- value of the control arm
+                    challenger_values   TEXT NOT NULL,  -- JSON array of challenger values
+                    status              TEXT NOT NULL DEFAULT 'running',
+                        -- running | winner_proposed | winner_pending | winner_applied
+                        -- | rolled_back | contaminated | expired
+                    start_sim_ts        TEXT NOT NULL,
+                    end_sim_ts          TEXT,           -- set when status becomes terminal
+                    last_look_day       TEXT,           -- "YYYY-MM-DD" of last evaluation look
+                    proposal_id         TEXT,           -- FK to approvals (our proposal_id)
+                    winner_value        TEXT,           -- set when status = winner_*
+                    apply_sim_ts        TEXT,           -- simTs when approval was applied
+                    contaminated_reason TEXT            -- supervisor edit ref or similar
+                )
+            """);
+            st.execute("CREATE INDEX IF NOT EXISTS idx_exp_wf_status ON experiments(workflow_id, status)");
+            st.execute("CREATE INDEX IF NOT EXISTS idx_exp_wf_cohort_dim ON experiments(workflow_id, cohort_id, dimension)");
+        }
+        log.info("Schema migration v2 complete.");
     }
 
     // ── Versioning helpers ────────────────────────────────────────────────────
