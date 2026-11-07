@@ -12,46 +12,53 @@ point leaves the system in a consistent state on restart.
 
 ## Requirements
 
-- **JDK 21** (tested on Eclipse Adoptium 17 and 21; 17 works, 21 preferred)
-- **Maven 3.9+**
+- **JDK 17 or 21** (tested on Eclipse Adoptium 17.0.17 and 21; set `JAVA_HOME` or let `run.sh` find it)
+- **Maven 3.9+** on `PATH`
 - **Python 3.10+** with `pip install -r requirements.txt` for the simulator
 
 ---
 
 ## How to run
 
+All commands are for Windows PowerShell. On Linux/Mac replace `$env:VAR = "..."` with `export VAR=...`.
+
 ### public_01 (3 workflows, 8 days, no incidents)
 
-```bash
+```powershell
 # Terminal 1 — simulator
 python -m sim baseline --scenario scenarios/public_01_dev.yaml --run-dir runs/base01
 python -m sim serve    --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01
 
 # Terminal 2 — controller (builds on first run; ~30 s)
 mvn -q package -DskipTests -f controller/pom.xml
-DB_PATH=runs/mine01/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+$env:DB_PATH = "runs/mine01/controller.db"
+$env:TICK_MINUTES = "60"
+java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
 # Terminal 3 — grade (run after the controller exits)
-$env:PYTHONIOENCODING="utf-8"
+$env:PYTHONIOENCODING = "utf-8"
 python -m sim grade --run runs/mine01 --baseline runs/base01 --out reports/public_01.md
 ```
 
 ### public_02 (caller-ID incident, bad supervisor prompt, mid-experiment config edit)
 
-```bash
+```powershell
 # Terminal 1
 python -m sim baseline --scenario scenarios/public_02_incidents.yaml --run-dir runs/base02
 python -m sim serve    --scenario scenarios/public_02_incidents.yaml --run-dir runs/mine02
 
 # Terminal 2
-DB_PATH=runs/mine02/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+$env:DB_PATH = "runs/mine02/controller.db"
+$env:TICK_MINUTES = "60"
+java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
 # Terminal 3
-$env:PYTHONIOENCODING="utf-8"
+$env:PYTHONIOENCODING = "utf-8"
 python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
 ```
 
-> **Note:** grade reports for both scenarios are already committed in `reports/`.
+> **Note:** committed grade reports are in `reports/public_01.md` and `reports/public_01_day2.md`.
+> Running the commands above regenerates them for a fresh run.
 
 ---
 
@@ -61,7 +68,7 @@ python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/publi
 |---|---|---|
 | C1 Ingestion | Done | Idempotent, cursor-based, single transaction per chunk |
 | C2 Shared cohort object | Done | One function used by detection and experiments; OR-within-feature, AND-across-features |
-| C5 Caller-ID health | Done | Flags bad IDs after min-sample + persistence check; rotates within auto-apply policy, splits if shift exceeds max_shift |
+| C5 Caller-ID health | Done | Flags bad IDs after min-sample + persistence check; proposes rotation within auto-apply policy |
 | C6 Experiments | Done | Two-proportion z-test, Holm correction, one look per simulated day, min 300 connected calls per arm |
 | C7 Promotion and rollback | Done | Re-measures winners post-apply; proposes rollback on sustained negative advantage |
 | C8 Hallucination response | Done | Detects rate rise above baseline; proposes prompt rollback with evidence; records "awaiting_validation" if no validation run exists; never auto-applies |
@@ -79,34 +86,31 @@ python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/publi
 
 ## Crash recovery test
 
-```bash
+```powershell
 # 1. Start sim and controller (Terminals 1 and 2 as above, then wait ~60 s for a few ticks)
 
 # 2. Kill the controller hard
-Get-Process -Name java | Stop-Process -Force          # Windows
-# or:  kill -9 <pid>                                  # Linux/Mac
+Get-Process -Name java | Stop-Process -Force
 
 # 3. Restart — the controller picks up from its cursor
-DB_PATH=runs/mine01/controller.db java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
+$env:DB_PATH = "runs/mine01/controller.db"
+$env:TICK_MINUTES = "60"
+java -jar controller/target/controller-1.0.0-SNAPSHOT.jar http://127.0.0.1:8700
 
-# 4. Confirm: audit log has no duplicate intent_to_apply rows and total events match
+# 4. Confirm: audit log has no duplicate intent_to_apply rows and cursor advanced past restart point
 python -c "
 import sqlite3
 db = sqlite3.connect('runs/mine01/controller.db')
 cur = db.cursor()
-# No proposal should appear in intent_to_apply more than once
-rows = cur.execute('''
-  SELECT payload_json, COUNT(*) as n FROM audit_log
-  WHERE kind = 'intent_to_apply'
-  GROUP BY payload_json HAVING n > 1
-''').fetchall()
+rows = cur.execute('SELECT payload_json, COUNT(*) as n FROM audit_log WHERE kind = ? GROUP BY payload_json HAVING n > 1', ('intent_to_apply',)).fetchall()
 print('Duplicates (expect 0 rows):', rows)
-print('Total events ingested:', cur.execute('SELECT SUM(events_in_chunk) FROM ingest_cursors').fetchone())
+cursor_val = cur.execute('SELECT value FROM kv_state WHERE key = ?', ('event_cursor',)).fetchone()
+print('Event cursor after restart:', cursor_val)
 db.close()
 "
 ```
 
-Evidence from the committed run is in `reports/kill9_evidence.txt`.
+Evidence from a committed kill/restart run is in `reports/kill_restart_evidence.txt`.
 
 ---
 
@@ -144,7 +148,7 @@ Example row from the `public_01` run:
 
 | workflow_id | trigger_and_numbers | proposal_id | approval_id | approval_status | next_event |
 |---|---|---|---|---|---|
-| nw_kyc | Hour-weight optimisation (chi2=20.21, p=0.0005, TVD=0.1947) | ctrl-3b393c36db47901b80d320c3 | apr_00001 | applied | hour_weight_applied |
+| nw_kyc | Hour-weight optimisation (chi2=20.21, p=0.0005, TVD=0.1947) | ctrl-3b393c36db47901b80d320c3 | apr_00001 | applied | campaign_created |
 
 ---
 
@@ -153,11 +157,13 @@ Example row from the `public_01` run:
 | Environment variable | Default | Description |
 |---|---|---|
 | `DB_PATH` | `controller.db` | Path to the SQLite database file |
-| `TICK_MINUTES` | `60` | Simulated minutes per controller tick |
+| `TICK_MINUTES` | `15` | Simulated minutes per controller tick (set to `60` for public_01/02) |
 | `HEALTH_PORT` | `8701` | Port for the `/health` HTTP endpoint |
-| `MIN_CONNECTED_PER_ARM` | `300` | Minimum connected calls per arm before an experiment look |
-| `MIN_DIALS_FOR_CALLER_ID_FLAG` | `200` | Minimum dials before a caller ID can be flagged |
-| `CALLER_ID_WINDOW_DAYS` | `3` | Rolling window for caller-ID pickup-rate comparison |
+| `LOG_LEVEL` | `info` | SLF4J log level: `trace` / `debug` / `info` / `warn` / `error` |
+
+Brain thresholds (min sample, gap size, persistence ticks) are constants in
+`controller/src/main/java/com/formi/controller/brain/BrainConfig.java` with inline justifications.
+To change them, edit the constant and recompile.
 
 ---
 
