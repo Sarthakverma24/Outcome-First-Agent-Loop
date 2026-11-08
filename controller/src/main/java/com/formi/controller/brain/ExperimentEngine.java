@@ -138,9 +138,51 @@ public class ExperimentEngine {
 
         // Create a new experiment
         String expId = computeExperimentId(wfId, cohortId, dim, currentSimTs);
+
+        // Build exploration allocation to test challengers
+        ObjectNode proposed = cv.config.deepCopy();
+        setExplorationAllocation(proposed, dim, controlValue, challengers, cohortId);
+
+        String targetCohort = (cohortId != null && !cohortId.isBlank()) ? cohortId : "default";
+        Map<String, Object> diff = Map.of(
+                "allocations." + targetCohort + "." + dim,
+                "split between control " + controlValue + " and challengers " + challengers
+        );
+        Map<String, Object> dryRun = Map.of(
+                "type", "experiment_start",
+                "control", controlValue,
+                "challengers", challengers,
+                "dim", dim,
+                "cohort", targetCohort
+        );
+
+        String rationale = String.format(
+                "Starting A/B experiment on %s for cohort %s. Control '%s' retained with >= 10%% traffic; " +
+                "allocating traffic to challengers %s.",
+                dim, targetCohort, controlValue, challengers
+        );
+
+        String approvalId = governance.propose(
+                workflow, cv.version, proposed,
+                "Start experiment: explore " + dim + " challengers " + challengers + " vs " + controlValue,
+                diff,
+                estimateAffectedLeads(wfId, cohortId),
+                dryRun,
+                0.3,
+                rationale,
+                Map.of("experimentId", expId, "challengers", challengers),
+                currentSimTs
+        );
+
+        if (approvalId == null) {
+            log.info("[{}][{}][{}] Could not submit exploration proposal (outside approver hours or rate limit) — will retry next tick.",
+                    wfId, cohortId, dim);
+            return;
+        }
+
         insertExperiment(expId, wfId, cohortId, dim, controlValue, challengers, currentSimTs);
-        log.info("[{}][{}][{}] Started experiment {} control={} challengers={}",
-                wfId, cohortId, dim, expId, controlValue, challengers);
+        log.info("[{}][{}][{}] Started experiment {} approval_id={} control={} challengers={}",
+                wfId, cohortId, dim, expId, approvalId, controlValue, challengers);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -580,10 +622,28 @@ public class ExperimentEngine {
 
     /** Extract the current value of a dimension from the config JSON. */
     private static String extractCurrentValue(JsonNode config, String dim) {
-        // Try top-level first, then inside cohorts.default
+        // 1. Try allocations.default.<dim> (standard simulator schema)
+        JsonNode allocDef = config.path("allocations").path("default").path(dim);
+        if (allocDef.isObject()) {
+            String bestOpt = null;
+            double maxWeight = -1.0;
+            var it = allocDef.fields();
+            while (it.hasNext()) {
+                var entry = it.next();
+                double w = entry.getValue().asDouble(0.0);
+                if (w > maxWeight) {
+                    maxWeight = w;
+                    bestOpt = entry.getKey();
+                }
+            }
+            if (bestOpt != null) return bestOpt;
+        }
+
+        // 2. Try top-level
         JsonNode v = config.path(dim);
         if (!v.isMissingNode() && v.isTextual()) return v.asText();
-        // Some workflows store it nested under cohorts.{cohortId}
+
+        // 3. Try cohorts
         JsonNode cohorts = config.path("cohorts");
         if (cohorts.isObject()) {
             var it = cohorts.fields();
@@ -596,10 +656,32 @@ public class ExperimentEngine {
         return null;
     }
 
+    /** Build exploration allocation splitting traffic among control and challengers. */
+    private static void setExplorationAllocation(ObjectNode proposed, String dim,
+                                                 String controlValue, List<String> challengers,
+                                                 String cohortId) {
+        JsonNode allocNode = proposed.path("allocations");
+        if (!allocNode.isObject()) return;
+        ObjectNode allocObj = (ObjectNode) allocNode;
+        String targetCohort = (cohortId != null && allocObj.has(cohortId)) ? cohortId : "default";
+        JsonNode cohortNode = allocObj.path(targetCohort);
+        if (cohortNode.isObject()) {
+            ObjectNode cObj = (ObjectNode) cohortNode;
+            ObjectNode dimMap = MAPPER.createObjectNode();
+            // Control arm retains at least 20% (>= 10%), challengers split remainder
+            double challengerShare = Math.round((0.80 / challengers.size()) * 100.0) / 100.0;
+            double controlShare = 1.0 - (challengerShare * challengers.size());
+            dimMap.put(controlValue, controlShare);
+            for (String ch : challengers) {
+                dimMap.put(ch, challengerShare);
+            }
+            cObj.set(dim, dimMap);
+        }
+    }
+
     /** Update the dimension allocation in proposed config, ensuring control arm has at least 10% of traffic. */
     private static void setDimensionInConfig(ObjectNode proposed, String dim, String winner, String controlValue, String cohortId) {
-        proposed.put(dim, winner);
-
+        // Note: Do not put dim at the root of proposed config (root only allows cohorts, allocations, prompt_version, schedule)
         // Update allocations map: control arm is at least 10% of traffic, winner gets remainder
         JsonNode allocNode = proposed.path("allocations");
         if (allocNode.isObject()) {

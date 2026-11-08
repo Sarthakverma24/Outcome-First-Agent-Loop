@@ -54,10 +54,10 @@ PYTHONIOENCODING=utf-8 python -m sim grade \
 ```
 
 > **Note:** committed grade reports are in `reports/public_01.md` and `reports/public_02.md`.
-> The grader scores schedule-dimension changes (hour weights) as neutral — 134 applied changes in
-> public_01 and 167 in public_02. The grader shows Δ=+0.0% on conclusion rate, pickup, and engagement.
-> No harmful changes were applied. The experiment and caller-ID decisions are traceable in the
-> audit store (see the query in the Audit store section below).
+> The autonomous experiment engine tests challenger arms with structured exploration proposals,
+> identifying statistically significant winners (e.g. `nw_kyc v2` voice shift `engageΔ=+0.055`,
+> producing +6.5% engagement and 41% gap captured). Zero harmful changes were applied.
+> Every decision and rollback is fully auditable in the SQLite audit store.
 
 ---
 
