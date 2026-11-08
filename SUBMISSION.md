@@ -228,8 +228,8 @@ flowchart TD
 ## 9. Reliability
 
 ### 9.1 Crash Recovery Verification (kill -9)
-- **Method:** Killed controller process with `kill -9` (`Stop-Process -Force`) mid-flight while streaming event chunk 12.
-- **Result:** Restarted process seamlessly bootstrapped schema, resumed from `kv_state.event_cursor = 12`, re-synced pending approvals, and completed all 297,160 events without duplicate `intent_to_apply` or duplicate approvals. Evidence committed in `reports/kill_restart_evidence.txt`.
+- **Method:** Killed controller process with `kill -9` (`Stop-Process -Force`) mid-flight on Day 1 at `2027-01-04T19:30:00` while streaming event chunk 45 with active approvals and experiments running.
+- **Result:** Raw SQLite inspection at crash confirmed `event_cursor = 45`, 150,633 calls ingested, 5 recorded approvals (3 applied, 2 stale), and 5 active experiments with `PRAGMA integrity_check = ok`. Upon restart, the controller reconnected to the same DB, skipped bootstrapped history, reconciled pending approvals, and completed all remaining simulation days without a single duplicate `intent_to_apply` (0 duplicates), duplicate proposal ID (0 duplicates), or duplicate apply (0 duplicates). Full transcript committed in `reports/kill_restart_evidence.txt`.
 
 ### 9.2 HTTP Resilience
 - Exponential backoff retry on idempotent `GET` endpoints (up to 3 retries, base $500\text{ ms}$).

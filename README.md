@@ -115,9 +115,9 @@ EOF
 ```
 
 The committed evidence file is `reports/kill_restart_evidence.txt`. It shows the controller was
-killed at cursor=0 (before the first chunk was committed), restarted, and ran to completion
-(297,026 events ingested). The Phase 3/5 inline validation scripts in that file contain a quoting
-bug and do not print assertions — the cursor and duplicate checks above are the correct form.
+killed mid-flight at event_cursor=45 on Day 1 (with 150,633 calls ingested and 5 active approvals recorded),
+restarted against the same database, seamlessly resumed without re-ingesting prior chunks, and ran to completion
+with zero duplicate proposal submissions, zero duplicate intent_to_apply entries, and zero duplicate applies.
 
 ---
 
